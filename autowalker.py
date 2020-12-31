@@ -27,7 +27,7 @@ HEADER_GET_GUEST_ROOM = 385
 
 
 def log(message):
-    print(f'({time.strftime("%d %b %Y %H:%M:%S", time.gmtime())}) {message}')
+    print(f'({time.strftime("%d %b %Y %H:%M:%S", time.gmtime())}) <AutoWalker> {message}')
 
 
 class AutoWalker:
@@ -103,24 +103,41 @@ class AutoWalker:
         if self.addMode:
             self.addTile(x, y)
 
+    def process_users_in_room(self, entities):
+        for x in range(len(entities)):
+            log(f'Entity {entities[x]}')
+
+    def start_user_processing_thread(self, entities):
+        thread = threading.Thread(target=self.process_users_in_room, args=(entities,))
+        thread.start()
+
     def on_users_in_room(self, message: HMessage) -> int:
-        self.entities.extend(HUnityEntity.parse(message.packet))
-        for x in range(len(self.entities)):
-            log(f'Entity {self.entities[x]}')
+        entities = HUnityEntity.parse(message.packet)
+        self.entities.extend(entities)
+        self.start_user_processing_thread(entities)
         return len(self.entities)
 
-    def on_status(self, message: HMessage) -> None:
-        statusUpdates = HUnityStatus.parse(message.packet)
+    def process_status_updates(self, statusUpdates):
         if self.tiles:
             for x in range(len(statusUpdates)):
                 current = statusUpdates[x]
+                log(f'{current}')
                 if self.currentUser is not None and current.index == self.currentUser.index:
                     currentTile = self.tiles[self.currentTileIndex]
-                    log(f'Status update {current} / {currentTile}')
-                    if currentTile[0] == current.tile.x and currentTile[1] == current.tile.y:
+                    # log(f'Status update {current} / {currentTile}')
+                    if currentTile[0] == current.nextTile.x and currentTile[1] == current.nextTile.y:
                         log(f'MATCH {current} - {currentTile}')
                         if self.walking:
                             self.nextTile()
+
+    def start_status_processing_thread(self, statusUpdates):
+        thread = threading.Thread(target=self.process_status_updates, args=(statusUpdates, ))
+        thread.start()
+
+    def on_status(self, message: HMessage) -> int:
+        statusUpdates = HUnityStatus.parse(message.packet)
+        self.start_status_processing_thread(statusUpdates)
+        return len(statusUpdates)
 
     def on_get_guest_room(self, message: HMessage) -> None:
         self.reset()
