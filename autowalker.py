@@ -1,14 +1,11 @@
-import sys
 import threading
 import time
 
-from g_python.gextension import Extension
 from g_python.hdirection import Direction
 from g_python.hmessage import HMessage
 from g_python.hparsers import HEntityType, HPoint
-from g_python.gunityparsers import HUnityEntity, HUnityStatus
+from g_python.hunityparsers import HUnityEntity, HUnityStatus
 
-# from hunityparsers import HUnityEntity, HUnityStatus
 
 ADD_TILES_COMMAND = '!addtiles'
 STOP_ADD_COMMAND = '!stopadd'
@@ -18,6 +15,8 @@ STOP_WALK_COMMAND = '!stop'
 SET_INTERVAL_COMMAND = '!setinterval'
 CLEAR_TILES_COMMAND = '!cleartiles'
 SET_USER_COMMAND = '!setuser'
+BLOCK_ON_ADD_COMMAND = '!blockonadd'
+VERBOSE_COMMAND = '!verbose'
 
 HEADER_MOVE = 75
 HEADER_SPEACH = 52
@@ -26,185 +25,178 @@ HEADER_USERS_IN_ROOM = 28
 HEADER_GET_GUEST_ROOM = 385
 
 
-def log(message):
-    print(f'({time.strftime("%d %b %Y %H:%M:%S", time.gmtime())}) <AutoWalker> {message}')
-
-
 class AutoWalker:
-    def __init__(self, extension):
-        self.extension = extension
-        self.threadStarted = False
-        self.walking = False
-        self.currentTileIndex = 0
-        self.addMode = False
-        self.currentUser = None
-        self.walkThread = None
-        self.tiles = []
-        self.entities = []
-        self.WALK_INTERVAL = 1000
-        self.extension.intercept(Direction.TO_SERVER, self.on_speech, HEADER_SPEACH)
-        self.extension.intercept(Direction.TO_SERVER, self.on_move, HEADER_MOVE)
-        self.extension.intercept(Direction.TO_SERVER, self.on_get_guest_room, HEADER_GET_GUEST_ROOM)
+    def __init__(self, extension, room_users, verbose=True):
+        self.__extension = extension
+        self.__verbose = verbose
+        self.__walkingIntervalThreadStarted = False
+        self.__walking = False
+        self.__currentTileIndex = 0
+        self.__addMode = False
+        self.__currentUser = None
+        self.__walkIntervalThread = None
+        self.__tiles = []
+        self.__walkInterval = 1000
+        self.__blockOnAdd = True
+        self.__roomUsers = room_users
 
-        self.extension.intercept(Direction.TO_CLIENT, self.on_status, HEADER_STATUS)
-        self.extension.intercept(Direction.TO_CLIENT, self.on_users_in_room, HEADER_USERS_IN_ROOM)
+        self.__extension.intercept(Direction.TO_SERVER, self.__on_speech, HEADER_SPEACH)
+        self.__extension.intercept(Direction.TO_SERVER, self.__on_move, HEADER_MOVE)
+        self.__extension.intercept(Direction.TO_SERVER, self.__on_get_guest_room, HEADER_GET_GUEST_ROOM)
 
-    def startThread(self) -> None:
-        if not self.threadStarted:
-            self.walkThread = threading.Thread(target=self.walkTiles)
-            self.walkThread.start()
-            log('Walk thread started')
+        self.__extension.intercept(Direction.TO_CLIENT, self.__on_status, HEADER_STATUS)
 
-    def walkTiles(self):
+    def __start_walk_interval_thread(self) -> None:
+        if not self.__walkingIntervalThreadStarted:
+            self.__walkIntervalThread = threading.Thread(target=self.__walk_interval)
+            self.__walkIntervalThread.start()
+            self.log('Walk thread started')
+
+    def __walk_interval(self):
         thread = threading.currentThread()
-        log('Starting spam thread')
+        self.log('Starting spam thread')
         while getattr(thread, 'do_run', True):
-            if self.tiles:
-                for tile in self.tiles:
+            if self.__tiles:
+                for tile in self.__tiles:
                     log(f'Walkting to tile {tile}')
-                    self.walkToTile(tile[0], tile[1])
-                    time.sleep(self.WALK_INTERVAL / 1000)
-        self.threadStarted = False
-        log('Thread was interrupted')
+                    self.walk_to_tile(tile[0], tile[1])
+                    time.sleep(self.__walkInterval / 1000)
+        self.__walkingIntervalThreadStarted = False
+        self.log('Thread was interrupted')
 
-    def nextTile(self):
-        tilesLength = len(self.tiles)
-        self.currentTileIndex = self.currentTileIndex + 1 if self.currentTileIndex + 1 < tilesLength else 0
-        currentTile = self.tiles[self.currentTileIndex]
-        self.walkToTile(currentTile[0], currentTile[1])
-        log(f'next tile: current idx [{self.currentTileIndex}] - currrent {currentTile}')
+    def __next_tile(self):
+        tilesLength = len(self.__tiles)
+        self.__currentTileIndex = self.__currentTileIndex + 1 if self.__currentTileIndex + 1 < tilesLength else 0
+        currentTile = self.__tiles[self.__currentTileIndex]
+        self.walk_to_tile(currentTile[0], currentTile[1])
+        self.log(f'next tile: current idx [{self.__currentTileIndex}] - currrent {currentTile}')
 
-    def walkToTile(self, x: int, y: int):
-        self.extension.send_to_server('{l}{h:' + str(HEADER_MOVE) + '}{i:' + str(x) + '}{i:' + str(y) + '}')
-
-    def findUserByUserName(self, username: str) -> HUnityEntity:
+    def __findUserByUserName(self, username: str) -> HUnityEntity:
         entity = None
-        for x in range(len(self.entities)):
-            current = self.entities[x]
-            if current.entity_type == HEntityType.HABBO and current.name == username:
-                entity = current
+        for user in self.__roomUsers.room_users.values():
+            if user.entity_type == HEntityType.HABBO and user.name == username:
+                entity = user
         return entity
 
     def addTile(self, x, y) -> int:
-        log(f'Adding tile as tuple with coords X: {x} - Y: {y}')
-        self.tiles.append((x, y))
-        return len(self.tiles)
+        self.log(f'Adding tile as tuple with coords X: {x} - Y: {y}')
+        self.__tiles.append((x, y))
+        return len(self.__tiles)
 
-    def on_speech(self, message: HMessage) -> bool:
+    def __on_speech(self, message: HMessage) -> bool:
         (text, color, index) = message.packet.read('sii')
         # log(f'Text: {text} - Color: {color} - Index: {index}')
-        message.is_blocked = self.check_command(text)
+        message.is_blocked = self.__process_command(text)
         return message.is_blocked
 
-    def on_move(self, message: HMessage) -> None:
+    def __on_move(self, message: HMessage) -> None:
         (x, y) = message.packet.read('ii')
         # log(f'Walk on tile X: {x} - Y: {y}')
         # message.is_blocked = addMode
-        if self.addMode:
+        if self.__addMode:
             self.addTile(x, y)
 
-    def process_users_in_room(self, entities):
-        for x in range(len(entities)):
-            log(f'Entity {entities[x]}')
+        message.is_blocked = self.__blockOnAdd
 
-    def start_user_processing_thread(self, entities):
-        thread = threading.Thread(target=self.process_users_in_room, args=(entities,))
-        thread.start()
-
-    def on_users_in_room(self, message: HMessage) -> int:
-        entities = HUnityEntity.parse(message.packet)
-        self.entities.extend(entities)
-        self.start_user_processing_thread(entities)
-        return len(self.entities)
-
-    def process_status_updates(self, statusUpdates):
-        if self.tiles:
+    def __process_status_updates(self, statusUpdates):
+        if self.__tiles:
             for x in range(len(statusUpdates)):
                 current = statusUpdates[x]
-                log(f'{current}')
-                if self.currentUser is not None and current.index == self.currentUser.index:
-                    currentTile = self.tiles[self.currentTileIndex]
+                self.log(f'{current}')
+                if self.__currentUser is not None and current.index == self.__currentUser.index:
+                    currentTile = self.__tiles[self.__currentTileIndex]
                     # log(f'Status update {current} / {currentTile}')
                     if currentTile[0] == current.nextTile.x and currentTile[1] == current.nextTile.y:
-                        log(f'MATCH {current} - {currentTile}')
-                        if self.walking:
-                            self.nextTile()
+                        self.log(f'User reached tile match {current} - {currentTile}')
+                        if self.__walking:
+                            self.__next_tile()
 
-    def start_status_processing_thread(self, statusUpdates):
-        thread = threading.Thread(target=self.process_status_updates, args=(statusUpdates, ))
+    def __start_status_processing_thread(self, statusUpdates):
+        thread = threading.Thread(target=self.__process_status_updates, args=(statusUpdates,))
         thread.start()
 
-    def on_status(self, message: HMessage) -> int:
+    def __on_status(self, message: HMessage) -> int:
         statusUpdates = HUnityStatus.parse(message.packet)
-        self.start_status_processing_thread(statusUpdates)
+        self.__start_status_processing_thread(statusUpdates)
         return len(statusUpdates)
 
-    def on_get_guest_room(self, message: HMessage) -> None:
+    def __on_get_guest_room(self, message: HMessage) -> None:
         self.reset()
 
-    def check_command(self, text: str) -> bool:
+    def __process_command(self, text: str) -> bool:
         isCommand = False
 
         if text == ADD_TILES_COMMAND:
-            log('Set add mode to True')
-            self.addMode = True
+            self.log('Set add mode to True')
+            self.__addMode = True
             isCommand = True
         elif text == STOP_ADD_COMMAND:
-            log('Set add mode to False')
-            self.addMode = False
+            self.log('Set add mode to False')
+            self.__addMode = False
             isCommand = True
         elif text == WALK_INTERVAL_COMMAND:
             # START THREAD
-            log('Starting walk thread')
+            self.log('Starting walk thread')
             isCommand = True
-            self.addMode = False
-            self.startThread()
-            self.threadStarted = True
+            self.__addMode = False
+            self.__start_walk_interval_thread()
+            self.__walkingIntervalThreadStarted = True
         elif text == WALK_TILES_COMMAND:
-            self.walking = True
-            self.addMode = False
-            self.nextTile()
+            self.__walking = True
+            self.__addMode = False
+            self.__next_tile()
             isCommand = True
         elif text == STOP_WALK_COMMAND:
-            log('Stopping walk thread')
-            if self.walkThread:
-                self.walkThread.do_run = False
+            self.log('Stopping walk thread')
+            if self.__walkIntervalThread:
+                self.__walkIntervalThread.do_run = False
             isCommand = True
-            self.threadStarted = False
-            self.walking = False
+            self.__walkingIntervalThreadStarted = False
+            self.__walking = False
         elif SET_INTERVAL_COMMAND in text:
-            self.WALK_INTERVAL = int(self.getArgFromCommand(text, SET_INTERVAL_COMMAND))
-            log(f'Walk interval set to {self.WALK_INTERVAL}')
+            self.__walkInterval = int(self.__get_arg_from_command(text, SET_INTERVAL_COMMAND))
+            self.log(f'Walk interval set to {self.__walkInterval}')
             isCommand = True
         elif text == CLEAR_TILES_COMMAND:
-            log('Clearing tiles and stopping walk')
-            self.addMode = False
-            if self.walkThread:
-                self.walkThread.do_run = False
-            self.tiles = []
+            self.log('Clearing tiles and stopping walk')
+            self.__addMode = False
+            if self.__walkIntervalThread:
+                self.__walkIntervalThread.do_run = False
+            self.__tiles = []
             isCommand = True
-            self.threadStarted = False
+            self.__walkingIntervalThreadStarted = False
         elif SET_USER_COMMAND in text:
-            username = self.getArgFromCommand(text, SET_USER_COMMAND)
-            self.currentUser = self.findUserByUserName(username)
-            if self.currentUser is not None:
-                log(f'Current user set to [{self.currentUser.index}] {self.currentUser.name}')
+            username = self.__get_arg_from_command(text, SET_USER_COMMAND)
+            self.__currentUser = self.__findUserByUserName(username)
+            if self.__currentUser is not None:
+                self.log(f'Current user set to [{self.__currentUser.index}] {self.__currentUser.name}')
             else:
-                log(f'No user found with username {username}')
+                self.log(f'No user found with username {username}')
             isCommand = True
+        elif text == BLOCK_ON_ADD_COMMAND:
+            self.__blockOnAdd = not self.__blockOnAdd
+            isCommand = True
+        elif text == VERBOSE_COMMAND:
+            self.__verbose = not self.__verbose
 
         return isCommand
 
     @staticmethod
-    def getArgFromCommand(text: str, command: str) -> str:
+    def __get_arg_from_command(text: str, command: str) -> str:
         return str(text.replace('{} '.format(command), ''))
+
+    def log(self, message):
+        if self.__verbose:
+            print(f'({time.strftime("%d %b %Y %H:%M:%S", time.gmtime())}) <AutoWalker> {message}')
+
+    def walk_to_tile(self, x: int, y: int):
+        self.__extension.send_to_server('{l}{h:' + str(HEADER_MOVE) + '}{i:' + str(x) + '}{i:' + str(y) + '}')
 
     def reset(self):
         # perform "reset"
-        self.addMode = False
-        self.entities = []
-        self.currentUser = None
-        self.tiles = []
-        if self.walkThread:
-            self.walkThread.do_run = False
-        self.threadStarted = False
+        self.__addMode = False
+        self.__currentUser = None
+        self.__tiles = []
+        if self.__walkIntervalThread:
+            self.__walkIntervalThread.do_run = False
+        self.__walkingIntervalThreadStarted = False
